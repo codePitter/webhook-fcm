@@ -51,3 +51,6 @@ module.exports = async (req, res) => {
     res.status(500).json({ ok: false, error: e?.message || "send failed" });
   }
 };
+
+// 👇 Fuerza runtime moderno de Vercel
+module.exports.config = { runtime: "nodejs18.x" };
