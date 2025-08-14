@@ -1,16 +1,40 @@
-// Vercel Serverless Function: POST /api/orders
-// Recibe el JSON del checkout y reenvía un FCM data-only al topic "orders"
-
+// api/orders.js
 const admin = require("firebase-admin");
 
-// Carga el service account desde variable de entorno (NO subas el JSON al repo)
-if (!admin.apps.length) {
-  const svc = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+let adminReady = false;
+function ensureAdmin() {
+  if (adminReady) return;
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (!raw) throw new Error("MISSING_ENV_FIREBASE_SERVICE_ACCOUNT_JSON");
+  let svc;
+  try {
+    svc = JSON.parse(raw);
+  } catch (e) {
+    throw new Error("BAD_ENV_FIREBASE_SERVICE_ACCOUNT_JSON");
+  }
   admin.initializeApp({ credential: admin.credential.cert(svc) });
+  adminReady = true;
+}
+
+async function readJSONBody(req) {
+  const ct = String(req.headers["content-type"] || "");
+  if (!ct.includes("application/json")) {
+    // Si quieres permitir x-www-form-urlencoded, aquí podrías parsearlo.
+    throw new Error("UNSUPPORTED_CONTENT_TYPE");
+  }
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error("INVALID_JSON_BODY");
+  }
 }
 
 module.exports = async (req, res) => {
-  // CORS básico
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-webhook-secret");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -18,17 +42,37 @@ module.exports = async (req, res) => {
 
   if (req.method !== "POST") return res.status(405).send("Only POST");
 
-  const b = req.body || {};
-  for (const k of ["id", "customerName", "total"]) {
-    if (!b[k]) return res.status(400).json({ error: `Missing ${k}` });
+  // Init Admin con mensajes claros
+  try {
+    ensureAdmin();
+  } catch (e) {
+    console.error("Admin init error:", e.message);
+    const map = {
+      MISSING_ENV_FIREBASE_SERVICE_ACCOUNT_JSON:
+        "Falta la env FIREBASE_SERVICE_ACCOUNT_JSON en Vercel.",
+      BAD_ENV_FIREBASE_SERVICE_ACCOUNT_JSON:
+        "FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido.",
+    };
+    return res.status(500).json({ ok: false, error: map[e.message] || e.message });
   }
 
-  // TODO(opcional): validar secreto compartido
-  // if (process.env.WEBHOOK_SECRET && req.headers["x-webhook-secret"] !== process.env.WEBHOOK_SECRET) {
-  //   return res.status(401).json({ error: "Invalid signature" });
-  // }
+  // Leer y validar body
+  let b;
+  try {
+    b = await readJSONBody(req);
+  } catch (e) {
+    console.error("Body parse error:", e.message);
+    const code =
+      e.message === "UNSUPPORTED_CONTENT_TYPE" ? 415 :
+      e.message === "INVALID_JSON_BODY" ? 400 : 400;
+    return res.status(code).json({ ok: false, error: e.message });
+  }
 
-  // En FCM data TODO debe ser string
+  for (const k of ["id", "customerName", "total"]) {
+    if (!b[k]) return res.status(400).json({ ok: false, error: `Missing ${k}` });
+  }
+
+  // Armar data (todo string)
   const data = {
     id: String(b.id),
     customerName: String(b.customerName),
@@ -45,12 +89,12 @@ module.exports = async (req, res) => {
       data,
       android: { priority: "high" },
     });
-    res.json({ ok: true, messageId });
+    return res.json({ ok: true, messageId });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: e?.message || "send failed" });
+    console.error("FCM send error:", e);
+    return res.status(500).json({ ok: false, error: e?.message || "send failed" });
   }
 };
 
-// 👇 Fuerza runtime moderno de Vercel
+// Fuerza runtime moderno en Vercel
 module.exports.config = { runtime: "nodejs18.x" };
