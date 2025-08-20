@@ -1,4 +1,4 @@
-// api/orders.js
+// api/order.js
 const admin = require("firebase-admin");
 
 let adminReady = false;
@@ -9,7 +9,7 @@ function ensureAdmin() {
   let svc;
   try {
     svc = JSON.parse(raw);
-  } catch (e) {
+  } catch {
     throw new Error("BAD_ENV_FIREBASE_SERVICE_ACCOUNT_JSON");
   }
   admin.initializeApp({ credential: admin.credential.cert(svc) });
@@ -19,7 +19,6 @@ function ensureAdmin() {
 async function readJSONBody(req) {
   const ct = String(req.headers["content-type"] || "");
   if (!ct.includes("application/json")) {
-    // Si quieres permitir x-www-form-urlencoded, aquí podrías parsearlo.
     throw new Error("UNSUPPORTED_CONTENT_TYPE");
   }
   const chunks = [];
@@ -28,7 +27,7 @@ async function readJSONBody(req) {
   if (!raw) return {};
   try {
     return JSON.parse(raw);
-  } catch (e) {
+  } catch {
     throw new Error("INVALID_JSON_BODY");
   }
 }
@@ -39,10 +38,9 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-webhook-secret");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
-
   if (req.method !== "POST") return res.status(405).send("Only POST");
 
-  // Init Admin con mensajes claros
+  // Firebase Admin
   try {
     ensureAdmin();
   } catch (e) {
@@ -56,7 +54,7 @@ module.exports = async (req, res) => {
     return res.status(500).json({ ok: false, error: map[e.message] || e.message });
   }
 
-  // Leer y validar body
+  // Body
   let b;
   try {
     b = await readJSONBody(req);
@@ -68,24 +66,44 @@ module.exports = async (req, res) => {
     return res.status(code).json({ ok: false, error: e.message });
   }
 
+  // Requisitos mínimos
   for (const k of ["id", "customerName", "total"]) {
     if (!b[k]) return res.status(400).json({ ok: false, error: `Missing ${k}` });
   }
 
-  // Armar data (todo string)
-  const data = {
-    id: String(b.id),
-    customerName: String(b.customerName),
-    total: String(b.total),
-    status: String(b.status || "PENDING"),
-  };
-  if (b.slotStart != null) data.slotStart = String(b.slotStart);
-  if (b.slotEnd   != null) data.slotEnd   = String(b.slotEnd);
-  if (b.courier   != null) data.courier   = String(b.courier);
+  // Construye data FCM (TODO string)
+  const passThrough = [
+    "id",
+    "customerName",
+    "total",
+    "status",
+    "courier",
+    "phone",
+    "scheduledTime",
+    "address",
+    "email",
+    "slotStart",
+    "slotEnd",
+  ];
+
+  const data = {};
+  for (const k of passThrough) {
+    if (b[k] != null) data[k] = String(b[k]);
+  }
+  // Por defecto status=PENDING si no vino
+  if (!data.status) data.status = "PENDING";
+
+  // items: FCM data requiere string; si viene array/obj → stringify
+  if (b.items != null) {
+    data.items = typeof b.items === "string" ? b.items : JSON.stringify(b.items);
+  }
+
+  // Enviar a token si viene; si no, al topic "orders"
+  const target = b.token ? { token: String(b.token) } : { topic: "orders" };
 
   try {
     const messageId = await admin.messaging().send({
-      topic: "orders",
+      ...target,
       data,
       android: { priority: "high" },
     });
@@ -96,5 +114,5 @@ module.exports = async (req, res) => {
   }
 };
 
-// Fuerza runtime moderno en Vercel
+// Vercel runtime
 module.exports.config = { runtime: "nodejs18.x" };
